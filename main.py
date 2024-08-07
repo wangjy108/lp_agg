@@ -2,23 +2,124 @@ from rdkit import Chem
 from rdkit.Chem import Draw, AllChem, rdMolAlign, rdFMCS, rdchem,rdMolAlign, rdShapeHelpers
 import os
 
-from ConfRelaxbySQM import System as optimizer
+from util.ConfRelaxbySQM import System as optimizer
 from util.Cluster import cluster
-from util.OptbySQM import System as opt
+from util.OptbySQM import System as sysopt
 
 from util.Align import Align as align
 import scipy.spatial
 import subprocess
+from multiprocessing import cpu_count
 
 import pandas as pd
 import numpy as np
+import logging
+logging.basicConfig(format='[%(levelname)s] %(message)s', level=logging.INFO)
+
 
 #from grid_sample import sasa as grid
 ## unipf grid sample
 
 ##
 
-def get_region_distribution(mol_xyz, mol_vdw, grid_space):
+class grid():
+    def __init__(self, **args):
+        #self.mol = args["rdmol_obj"]
+        self.xyz = args["xyz"]
+        self.vdw = args["vdw"]
+        self.probe_radius = args["margin"]
+        #self.method = args["sample_method"]
+
+        self.nMC = args["nMC"]
+        
+        self.dimension = np.pi * 4 * self.nMC ** 3
+
+        try:
+            self.precision = args["precision"]
+        except Exception as e:
+            self.precision = 1e-3
+        
+        try:
+            self.n_thread = args["n_thread"]
+        except Exception as e:
+            self.n_thread = cpu_count()
+        
+        self.n_layer = max(int(self.nMC * self.probe_radius), 1)
+
+        self.layer_thickness = self.probe_radius / self.n_layer
+        self.serial_radius = [i * self.layer_thickness for i in range(1, self.n_layer+1)]
+
+        self.gloden_ratio = (1 + 5 ** 0.5) / 2
+
+        try:
+            self.generate_space = args["xyz_idx_list"]
+        except Exception as e:
+            self.generate_space = [ii for ii in range(self.xyz.shape[0])]
+
+    def dotsphere(self, dimension):
+        i = np.arange(0, dimension)
+        theta = 2 * np.pi * i /self.gloden_ratio
+        phi = np.arccos(1 - 2 * (i+0.5)/ dimension)
+
+        x, y, z = (
+            np.cos(theta) * np.sin(phi),
+            np.sin(theta) * np.sin(phi),
+            np.cos(phi),
+        )
+        return np.array([x, y, z]).T
+    
+    def sample_surface(self, probe_radius):
+        
+        sample_dots = np.array([])
+        for i, coor in enumerate(self.xyz):
+            if i in self.generate_space:
+                anti_coor = np.delete(self.xyz, i, axis=0)
+                anti_vdw = np.delete(self.vdw, i, axis=0)
+                sample_size = int((self.vdw[i][0] + probe_radius) * self.dimension)
+                raw_dots = self.dotsphere(sample_size) * (probe_radius + self.vdw[i][0]) + coor
+
+                if not anti_coor.size:
+                    save_dots = raw_dots
+                else:
+                    dis = scipy.spatial.distance.cdist(raw_dots, anti_coor, metric='euclidean')
+                    save_dots = raw_dots[np.min(dis, axis=1) > (anti_vdw[np.argmin(dis, axis=1)].flatten() + probe_radius - self.precision)]
+
+                if not sample_dots.shape[0]:
+                    sample_dots = save_dots
+                else:
+                    sample_dots = np.vstack((sample_dots, save_dots))
+                
+        return sample_dots
+    
+    def run(self):
+        return self.sample_surface(self.probe_radius)
+
+def matched_region(input_rdmol_obj: object, apo_rdmol_obj:object) -> dict:
+
+    hit_region = list(input_rdmol_obj.GetSubstructMatch(apo_rdmol_obj))
+
+    HA_idx = [aa.GetIdx() for aa in input_rdmol_obj.GetAtoms() if aa.GetSymbol() != 'H']    
+
+    _dic = {}
+
+    for each in hit_region:
+        try:
+            HH = [(bb.GetEndAtomIdx(),bb.GetBeginAtomIdx()) for bb in input_rdmol_obj.GetBonds() if bb.GetBeginAtomIdx() == each or bb.GetEndAtomIdx() == each]
+        except Exception as e:
+            HH = None
+        
+        if HH:
+            get_HH = []
+            for every in HH:
+                reduced = [hh for hh in list(every) if hh not in HA_idx]
+                get_HH += reduced
+
+            if set(get_HH):
+                _dic.setdefault(each, list(set(get_HH)))
+    
+    return _dic
+
+def get_region_distribution(mol_xyz: object, mol_vdw: object, grid_space: object) -> dict:
     _dot = {}
 
     for i, coor in enumerate(mol_xyz):
@@ -53,15 +154,57 @@ def calc_np_p(dots, _charge, cutoff):
 
     return {"sas_p": sas_p, "sas_np": sas_np}
 
-## attention here
-def get_np_set(_path):
-    os.chdir(_path)
 
-    mol = Chem.SDMolSupplier("./mol.sdf", removeHs=False)[0]
-    #get_mol = [cc for cc in os.listdir() if cc.startswith("FILTER") and cc.endswith(".sdf")][0]
-    #mol = Chem.SDMolSupplier(get_mol, removeHs=False)[0]
+def get_np_set(mol: object,
+               mol_reduce: object,
+               charge_cutoff: float,
+               define_margin: float,
+               define_nMC: int) -> object:
+
+    #apo_rdmol_obj = Chem.MolFromSmiles(apo_smi)
+
+    #if not os.path.exists(_path):
+    #    logging.info("Wrong calculation path, abort")
+    #    return None
+
+    #os.chdir(_path)
+
+    #if not (os.path.isfile("mol.sdf") and os.path.isfile("reduce.sdf")):
+    #    logging.info("Neccessary sdf file(s) missing, nothing to do, abort")
+    #    return None
+
     
-    mol_reduce = Chem.SDMolSupplier("./reduce.sdf", removeHs=False)[0]
+    #try:
+    #    mol = Chem.SDMolSupplier("./mol.sdf", removeHs=False)[0]
+    #except Exception as e:
+    #    logging.info("Neccessary mol file(s) missing, nothing to do, abort")
+    #    return None
+    
+    #try:
+    #    mol_reduce = Chem.SDMolSupplier("./reduce.sdf", removeHs=False)[0]
+    #except Exception as e:
+    #    logging.info("Neccessary reduce file(s) missing, nothing to do, abort")
+    #    return None
+    
+    if not (mol and mol_reduce):
+        logging.info("No mol to process, abort")
+        return None
+    
+    apo_rdmol_obj = copy.deepcopy(mol_reduce)
+    apo_rdmol_obj = Chem.RemoveHs(apo_rdmol_obj)
+
+    _ = AllChem.Compute2DCoords(apo_rdmol_obj)
+    _dic = matched_region(mol, apo_rdmol_obj)
+
+    if not _dic:
+        logging.info("Reduced form matching error, abort")
+        return None
+        
+    reduce_in_mol_idx = [kk for kk in _dic.keys()]
+
+    for vv in _dic.values():
+        reduce_in_mol_idx += vv
+        
 
     get_xyz = mol.GetConformer().GetPositions()
     get_vdw = np.array([Chem.GetPeriodicTable().GetRvdw(a.GetAtomicNum()) \
@@ -75,21 +218,26 @@ def get_np_set(_path):
     ## get reduce in mol
     sample_mol = grid(xyz=get_xyz,
                   vdw=get_vdw,
-                  margin=0,
-                  sample_method="surface",
-                  nMC=1).sample()
+                  margin=define_margin,
+                  nMC=define_nMC).run()
     sample_reduce = grid(xyz=get_xyz_reduce,
                     vdw=get_vdw_reduce,
-                    margin=0,
-                    sample_method="surface",
-                    nMC=1).sample()
+                    margin=define_margin,
+                    nMC=define_nMC).run()
+    sample_reduce_in_mol =grid(xyz=get_xyz,
+                               vdw=get_vdw,
+                               margin=define_margin,
+                               nMC=define_nMC,
+                               xyz_idx_list=reduce_in_mol_idx).run()
     
-    idx_array = np.where(np.min(scipy.spatial.distance.cdist(sample_reduce, sample_mol, metric='euclidean'), axis=1) ==0)
+    #idx_array = np.where(np.min(scipy.spatial.distance.cdist(sample_reduce, sample_mol, metric='euclidean'), axis=1) ==0)
+    #print(np.argmin(scipy.spatial.distance.cdist(sample_reduce, sample_mol, metric='euclidean'), axis=1))
+    #idx_array = np.argmin(scipy.spatial.distance.cdist(sample_reduce, sample_mol, metric='euclidean'), axis=1)
 
-    sample_reduce_in_mol = sample_mol[list(idx_array[0])]
+    #sample_reduce_in_mol = sample_mol[list(idx_array)]
 
-    matched_xyz = get_xyz[list(np.where(np.min(scipy.spatial.distance.cdist(get_xyz, get_xyz_reduce, metric='euclidean'), axis=1) ==0)[0])]
-    matched_vdw = get_vdw[list(np.where(np.min(scipy.spatial.distance.cdist(get_xyz, get_xyz_reduce, metric='euclidean'), axis=1) ==0)[0])]
+    #matched_xyz = get_xyz[list(np.where(np.min(scipy.spatial.distance.cdist(get_xyz, get_xyz_reduce, metric='euclidean'), axis=1) ==0)[0])]
+    #matched_vdw = get_vdw[list(np.where(np.min(scipy.spatial.distance.cdist(get_xyz, get_xyz_reduce, metric='euclidean'), axis=1) ==0)[0])]
 
     AllChem.ComputeGasteigerCharges(mol)
     get_charge = [float(atom.GetProp("_GasteigerCharge")) for atom in mol.GetAtoms()]
@@ -97,7 +245,10 @@ def get_np_set(_path):
     AllChem.ComputeGasteigerCharges(mol_reduce)
     get_charge_reduce = [float(atom.GetProp("_GasteigerCharge")) for atom in mol_reduce.GetAtoms()]
 
-    matched_charge = np.array(get_charge)[list(np.where(np.min(scipy.spatial.distance.cdist(get_xyz, get_xyz_reduce, metric='euclidean'), axis=1) ==0)[0])]
+    matched_xyz = get_xyz[reduce_in_mol_idx]
+    matched_vdw = get_vdw[reduce_in_mol_idx]
+
+    matched_charge = np.array(get_charge)[reduce_in_mol_idx]
 
     #input_charge = pd.DataFrame({"idx":[i for i in range(len(get_charge))], "charge": get_charge})
 
@@ -110,7 +261,11 @@ def get_np_set(_path):
     dic_reduce = calc_np_p(reduce_dots, get_charge_reduce)
     dic_reduce_in_mol = calc_np_p(reduce_dots_in_mol, matched_charge)
 
-    df = pd.DataFrame({"mol:sas_p": [dic_mol["sas_p"]],
+    ## shading effects
+    shades = (sample_reduce.shape[0] - sample_reduce_in_mol.shape[0]) / sample_reduce.shape[0]
+
+    df = pd.DataFrame({"shade:sas": [shades],
+                       "mol:sas_p": [dic_mol["sas_p"]],
                        "mol:sas_np": [dic_mol["sas_np"]],
                        "reduce:sas_p": [dic_reduce["sas_p"]],
                        "reduce:sas_np": [dic_reduce["sas_np"]],
@@ -483,3 +638,233 @@ def assemble_saturated_fragment(rdmol_obj: object, apo_rdmol_obj: object):
         os.system("rm -f _TEMP*")
 
     return complete_hit_mol
+
+
+class adc_lp_agg():
+    def __init__(self, **args):
+        #self.Apo = args["apo_smi"]
+        #self.mol = args["mol_initial_conformer"]
+        
+        try:
+            self.nMC = int(args["set_nMC"])
+        except Exception as e:
+            self.nMC = 1
+        
+        try:
+            self.margin = float(args["set_margin"])
+        except Exception as e:
+            self.margin = 0
+        
+        try:
+            self.partial_charge_cutoff = float(args["polarity_cutoff"])
+        except Exception as e:
+            self.partial_charge_cutoff = 0.3
+        
+        
+
+        try:
+            self.mol = [cc for cc in Chem.SDMolSupplier(args["mol_initial_conformer"], removeHs=False) if cc]
+        except Exception as e:
+            self.mol = None
+
+        
+        try:
+            self.apo = Chem.MolFromSmiles(args["apo_smi"])
+        except Exception as e:
+            self.apo = None
+        
+        try:
+            self.sample_frame = int(args["sample_n_frame"])
+        except Exception as e:
+            self.sample_frame = None
+        
+        try:
+            self.energy_window = float(args["energy_window"])
+        except Exception as e:
+            self.energy_window = 20.0
+        
+        try:
+            self.duplicate_rmsd_cutoff = float(args["duplicate_rmsd_cutoff"])
+        except Exception as e:
+            self.duplicate_rmsd_cutoff = None
+        
+
+        try:
+            self.charge = args["define_charge"]
+        except Exception as e:
+            self.charge = None
+        
+    
+    def sample_from_initial_conformer(self, each_mol):
+        _dic_rotableBond = {0: 120, 1: 300} 
+        _dic_duplicate = {0: 1.0, 2: 2.0}
+
+        if not self.sample_frame:
+            rotable_bond = rdMolDescriptors.CalcNumRotatableBonds(each_mol)
+            _def_func = lambda x: 0 if max(8, x) == 8 else 1
+            rotable_bond_index = _def_func(rotable_bond)
+            n_sample_frame = _dic_rotableBond[rotable_bond_index]
+        else:
+            n_sample_frame = self.sample_frame
+        
+        if not self.duplicate_rmsd_cutoff:
+            rotable_bond = rdMolDescriptors.CalcNumRotatableBonds(each_mol)
+            _def_func = lambda x: 0 if max(8, x) == 8 else 1
+            rotable_bond_index = _def_func(rotable_bond)
+            duplicate_rmsd_cutoff = _dic_duplicate[rotable_bond_index]
+        else:
+            duplicate_rmsd_cutoff = self.duplicate_rmsd_cutoff
+
+        
+        ## perform initial_ha_opt
+
+        _initial_opt = sysopt(input_rdmol_obj=[each_mol],
+                                HA_constrain=True).run()
+        #self.charge = _initial_opt[0].GetProp("charge")
+        
+        #if not opt:
+        if not _initial_opt:
+            logging.info("Failed at initial opt")
+            return None
+        
+        cc = Chem.SDWriter("initial_opt.sdf")
+        cc.write(_initial_opt[0])
+        cc.close()
+
+        ## perform sampling
+
+        optimizer(input_sdf="initial_opt.sdf",
+                  save_frame=n_sample_frame).run()
+        
+        if not (os.path.isfile("SAVE.sdf") and os.path.getsize("SAVE.sdf")):
+            logging.info("Failed at sampling")
+            return 
+            #logging.info("Sampled Conformation(s) were saved in [SAVE.sdf]")
+            
+        ## reduce duplicate
+        MOL = cluster(input_sdf="SAVE.sdf", 
+                      rmsd_cutoff_cluster=duplicate_rmsd_cutoff,
+                      only_reduce_duplicate=True).run()
+        
+        if not MOL:
+            logging.info("Failed at decrease redundancy")
+            return None
+
+        optimized = sysopt(input_rdmol_obj=MOL,
+                            cpu_core=cpu_count() ,
+                            HA_constrain=True).run() 
+
+        if not optimized:
+            logging.info("Failed at post sampling optimization")
+            return None
+        
+
+        ## reduce outside window conformer
+
+        min_energy = min([float(x.GetProp("Energy_xtb")) for x in optimized])
+
+        saved_optimized = [cc for cc in optimized if (float(cc.GetProp("Energy_xtb")) - min_energy)*627.51 < self.energy_window]
+
+        return saved_optimized
+    
+    def get_reduce(self, each_mol: object) -> object:
+        
+        try:
+            _reduce = assemble_saturated_fragment(each_mol, self.apo)
+        except Exception as e:
+            logging.info("Failed at get matched apo form from specific conformer, abort")
+            return None
+        
+        if not _reduce:
+            logging.info("No matched apo form from specific conformer, abort")
+            return None
+        
+        opt_reduced = sysopt(input_rdmol_obj=[_reduce],
+                        HA_constrain=True,
+                        if_write_sdf=False).run()
+        
+        if not opt_reduced:
+            logging.info("Failed at optimize matched apo form from specific conformer, abort")
+            return None
+        
+
+        return opt_reduced[0]
+    
+    def calc_surface_property(self, mol: object, _reduce: object) -> object:
+
+        try:
+            df = get_np_set(mol, _reduce, self.partial_charge_cutoff, self.margin, self.nMC)
+        except Exception as e:
+            df = None
+        
+        return df
+    
+    def run(self):
+        logging.info("START linker-payload aggregation tendency evluation ---> ")
+
+        if not self.mol:
+            logging.info("Failed at picking up input conformers, abort")
+            return 
+        
+        logging.info("----> Processing")
+
+        _dic = {}
+            
+        for idx, each_mol in enumerate(self.mol):
+            mol_assemble = []
+            get_prefix = each_mol.GetProp("_Name")
+            logging.info(f"-> Working with {get_prefix}")
+            sampled_conformer = self.sample_from_initial_conformer(each_mol)
+            if not sampled_conformer:
+                logging.info(f"Failed with {get_prefix}, continue")
+                continue
+
+            for ii, opt_mol in enumerate(sampled_conformer):
+                get_reduced = self.get_reduce(opt_mol)
+                if not get_reduced:
+                    logging.info(f"Failed when get reduced form of {ii}th conformer for {get_prefix}, continue")
+                    continue
+
+                df = self.calc_surface_property(opt_mol, get_reduced)
+                if (not df) or df.shape[0]:
+                    mol_assemble.append(df)
+            
+            if mol_assemble:
+                df_all = pd.concat(mol_assemble)
+                df_all["delta_np"] = df_all.apply(lambda x: x["reduce_in_mol:sas_np"] - x["reduce:sas_np"], axis=1)
+                df_all["delta_p"] = df_all.apply(lambda x: x["reduce_in_mol:sas_p"] - x["reduce:sas_p"], axis=1)
+                #df["delta_np:delta_p"] = df.apply(lambda x: abs(x["delta_np"] / x["delta_p"]) if x['delta_p'] else (abs(x["delta_np"])), axis=1)
+                #df["np:p"] = df.apply(lambda x: x["mol:sas_np"] / x["mol:sas_p"], axis=1)
+                #df["reduce:np:p"] = df.apply(lambda x: x["reduce:sas_np"] / x["reduce:sas_p"], axis=1)
+                df_all["ratio:delta_np"] = df_all.apply(lambda x: abs(x["delta_np"]) / (abs(x["delta_p"]) + abs(x["delta_np"])), axis=1)
+                df_all["ratio:delta_p"] = df_all.apply(lambda x: abs(x["delta_p"]) / (abs(x["delta_p"]) + abs(x["delta_np"])), axis=1)
+                df_all["ratio-delta_p:ratio-delta_np"] = df_all.apply(lambda x: x["ratio:delta_p"] / x["ratio:delta_np"], axis=1)
+                _dic.setdefault(get_prefix, df_all)
+                logging.info("-> Success")
+        
+        logging.info("----> Finish")
+
+        return _dic
+
+            
+
+            
+
+
+
+
+
+
+            
+
+
+    
+
+        
+
+
+
+
+
+
+
