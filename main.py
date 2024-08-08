@@ -1,6 +1,8 @@
 from rdkit import Chem
-from rdkit.Chem import Draw, AllChem, rdMolAlign, rdFMCS, rdchem,rdMolAlign, rdShapeHelpers
+from rdkit.Chem import Draw, AllChem, rdMolAlign, rdFMCS, rdchem,rdMolAlign, rdShapeHelpers, rdMolDescriptors
 import os
+from matplotlib import pyplot as plt
+import copy
 
 from util.ConfRelaxbySQM import System as optimizer
 from util.Cluster import cluster
@@ -257,9 +259,9 @@ def get_np_set(mol: object,
     reduce_dots = get_region_distribution(get_xyz_reduce, get_vdw_reduce, sample_reduce)
     reduce_dots_in_mol = get_region_distribution(matched_xyz, matched_vdw, sample_reduce_in_mol)
 
-    dic_mol = calc_np_p(mol_dots, get_charge)
-    dic_reduce = calc_np_p(reduce_dots, get_charge_reduce)
-    dic_reduce_in_mol = calc_np_p(reduce_dots_in_mol, matched_charge)
+    dic_mol = calc_np_p(mol_dots, get_charge, charge_cutoff)
+    dic_reduce = calc_np_p(reduce_dots, get_charge_reduce, charge_cutoff)
+    dic_reduce_in_mol = calc_np_p(reduce_dots_in_mol, matched_charge, charge_cutoff)
 
     ## shading effects
     shades = (sample_reduce.shape[0] - sample_reduce_in_mol.shape[0]) / sample_reduce.shape[0]
@@ -697,7 +699,7 @@ class adc_lp_agg():
     
     def sample_from_initial_conformer(self, each_mol):
         _dic_rotableBond = {0: 120, 1: 300} 
-        _dic_duplicate = {0: 1.0, 2: 2.0}
+        _dic_duplicate = {0: 1.0, 1: 2.0}
 
         if not self.sample_frame:
             rotable_bond = rdMolDescriptors.CalcNumRotatableBonds(each_mol)
@@ -845,26 +847,55 @@ class adc_lp_agg():
         logging.info("----> Finish")
 
         return _dic
-
-            
-
-            
-
-
-
-
-
-
-            
-
-
     
+    def output(self, data_dic: dict) -> object:
 
-        
+        df_saver = {}
 
+        show_types = ["shade:sas", "ratio-delta_p:ratio-delta_np", "delta_np", "delta_p", "ratio:delta_np", "ratio:delta_p"]
 
+        cc_map = ["orange", "blue", "green", "green", "green", "green"]
 
+        ss_idx = [321, 322, 323, 324, 325, 326]
 
+        titles = ["Ratio of shield surface in total",
+                "Ratio of $\Delta_{Polar Surface}$ vs $\Delta_{Non Polar Surface}$",
+                "$\Delta_{Non Polar Surface}$",
+                "$\Delta_{Polar Surface}$",
+                "Ratio of $\Delta_{Non Polar Surface}$",
+                "Ratio of $\Delta_{Polar Surface}$ "]
+        ylabels = ["Sheilded surface / total surface",
+                "$\Delta_{Polar Surface}$ / $\Delta_{Non Polar Surface}$",
+                "$\Delta_{Non Polar Surface}$",
+                "$\Delta_{Polar Surface}$",
+                "$\Delta_{Non Polar Surface}$ / ($\Delta_{Non Polar Surface}$ +  $\Delta_{Polar Surface}$)",
+                    "$\Delta_{Polar Surface}$ / ($\Delta_{Non Polar Surface}$ +  $\Delta_{Polar Surface}$)"]
 
+        #f, axes = plt.subplots(3, 2, figsize=(12,8),tight_layout=True)
+        f = plt.figure(figsize=(15, 9), tight_layout=True)
 
+        for idx, tt in enumerate(show_types):
+            _df = pd.DataFrame({"sys": [kk for kk in data_dic.keys()],
+                    f"{tt}:avg": [vv[tt].mean() for vv in data_dic.values()],
+                    f"{tt}:std": [vv[tt].std() for vv in data_dic.values()]})
+
+            df_saver.setdefault(tt, _df)
+
+            ax = f.add_subplot(ss_idx[idx])
+
+            _df.plot.bar(x="sys", 
+                        y=f"{tt}:avg",
+                        rot=30, 
+                        legend=False, 
+                        color=cc_map[idx],
+                        ylabel="ratio $\Delta_{Polar Surface}$",
+                        ax=ax)
+            
+            ax.title.set_text(f"{titles[idx]}")
+
+            for p in ax.patches:
+                ax.annotate(f"{p.get_height():.3f}",
+                                    (p.get_x() * 1.005, p.get_height() * 1.005))
+            
+        return f, df_saver
 
