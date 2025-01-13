@@ -4,6 +4,8 @@ import pandas as pd
 from rdkit import Chem
 from multiprocessing import cpu_count
 from joblib import Parallel, delayed
+import scipy.spatial
+
 
 import logging
 logging.basicConfig(format='[%(levelname)s] %(message)s', \
@@ -99,7 +101,7 @@ class adc_agg():
         try:
             self.hit_scope = float(args["hit_scope"])
         except Exception as e:
-            self.hit_scope = 3.5
+            self.hit_scope = 4
             
         
         try:
@@ -112,78 +114,109 @@ class adc_agg():
         except Exception as e:
             self.nMC = 3
         
-
         try:
             self.margin = float(args["margin"])
         except Exception as e:
             self.margin = 0
-    
+        
+        self.u = mda.Universe(self.md_tpr, self.md_traj)
+
+        self.LP = self.u.select_atoms("resname L31 or resname L32 or resname L33 or resname L34 or resname L35 or resname L36 or resname L37 or resname L38")
+
+        #self.pre_Ab = self.u.select_atoms(f"resid 1-{self.terminal_residx} and around {self.hit_scope} group LP", LP=self.LP)
+        pre_Ab = self.u.select_atoms(f"resid 1-{self.terminal_residx} and around {self.hit_scope} group LP", LP=self.LP)
+        self.Ab = pre_Ab.residues
 
     
-    def region_split(self, frame):
+    def region_split(self, frame_list):
         # single frame
-        LP = frame.select_atoms("resname L31 or resname L32 or resname L33 or resname L34 or resname L35 or resname L36 or resname L37 or resname L38")
 
-        xyz_LP = []
-        charge_LP = []
-        vdw_LP = []
+        assemble = []
 
-        for aa in LP.atoms:
-            xyz_LP.append(list(aa.position))
-            vdw_LP.append(Chem.GetPeriodicTable().GetRvdw(Chem.GetPeriodicTable().GetAtomicNumber(aa.name[0])))
-            #atomicidx.append(atom.index+1)
-            charge_LP.append(aa.charge)
+        for ts in frame_list:
+            xyz_LP = []
+            charge_LP = []
+            vdw_LP = []
+            
+            for aa in self.LP.atoms:
+                xyz_LP.append(list(aa.position))
+                vdw_LP.append(Chem.GetPeriodicTable().GetRvdw(Chem.GetPeriodicTable().GetAtomicNumber(aa.name[0])))
+                #atomicidx.append(atom.index+1)
+                charge_LP.append(aa.charge)
 
-        get_LP_xyz = np.array(xyz_LP)
-        get_LP_vdw = np.array(vdw_LP).reshape(-1,1)
-        get_LP_charge = np.array(charge_LP).reshape(-1,1)
+            get_LP_xyz = np.array(xyz_LP)
+            get_LP_vdw = np.array(vdw_LP).reshape(-1,1)
+            get_LP_charge = np.array(charge_LP).reshape(-1,1)
 
-        pre_Ab = frame.select_atoms(f"resid 1-{self.terminal_residx} and around {self.hit_scope} group LP", LP=LP)
+            #assembled_res = []
 
-        assembled_res = []
+            #for aa in self.pre_Ab.atoms:
+            #    assembled_res.append(aa.resid)
+            
+            xyz_ab = []
+            vdw_ab = []
+            #atomicidx = []
+            charge_ab = []
 
-        for aa in pre_Ab:
-            assembled_res.append(aa.resid)
-        
-        xyz_ab = []
-        vdw_ab = []
-        #atomicidx = []
-        charge_ab = []
-        
-        for atom in frame.atoms:
-            if atom.resid in assembled_res:
+            for atom in self.Ab.atoms:
                 xyz_ab.append(list(atom.position))
                 vdw_ab.append(Chem.GetPeriodicTable().GetRvdw(Chem.GetPeriodicTable().GetAtomicNumber(atom.name[0])))
-                #atomicidx.append(atom.index+1)
                 charge_ab.append(atom.charge)
+            
+            #for atom in self.u.atoms:
+            #    if atom.resid in list(set(assembled_res)):
+            #        xyz_ab.append(list(atom.position))
+            #        vdw_ab.append(Chem.GetPeriodicTable().GetRvdw(Chem.GetPeriodicTable().GetAtomicNumber(atom.name[0])))
+            #        #atomicidx.append(atom.index+1)
+            #        charge_ab.append(atom.charge)
 
-        get_ab_xyz = np.array(xyz_ab)
-        get_ab_vdw = np.array(vdw_ab).reshape(-1,1)
-        get_ab_charge = np.array(charge_ab).reshape(-1,1)
+            get_ab_xyz = np.array(xyz_ab)
+            get_ab_vdw = np.array(vdw_ab).reshape(-1,1)
+            get_ab_charge = np.array(charge_ab).reshape(-1,1)
 
-        return {"LP": {"xyz": get_LP_xyz,
+            region = {"LP": {"xyz": get_LP_xyz,
                         "vdw": get_LP_vdw,
                         "charge": get_LP_charge},
-                "Ab": {"xyz": get_ab_xyz,
-                       "vdw": get_ab_vdw,
-                       "charge": get_ab_charge}}
+                      "Ab": {"xyz": get_ab_xyz,
+                        "vdw": get_ab_vdw,
+                        "charge": get_ab_charge}}
+
+            try:
+                focuse = region[self.focuse]
+            except Exception as e:
+                return None
+            
+            surrounding_key = [kk for kk in region.keys() if kk != self.focuse][0]
+            surrounding = region[surrounding_key]
+
+            PolarIdx = np.where((focuse["charge"]>=self.polar_cutoff) | (focuse["charge"] <= self.polar_cutoff * (-0.1)))[0]
+            NonPolarIdx = np.where((focuse["charge"] < self.polar_cutoff) & (focuse["charge"] > self.polar_cutoff * (-0.1)))[0]
+
+            sys_xyz = np.vstack((focuse["xyz"], surrounding["xyz"]))
+            sys_vdw = np.vstack((focuse["vdw"], surrounding["vdw"]))
+
+            get_df = self.calc_shade(frame_idx=ts.frame,
+                                    sys_xyz=sys_xyz,
+                                    sys_vdw=sys_vdw, 
+                                    focuse_xyz=focuse["xyz"],
+                                    focuse_vdw=focuse["vdw"],
+                                    PolarIdx=PolarIdx,
+                                    NonPolarIdx=NonPolarIdx)
+
+            assemble.append(get_df)
+
+        return assemble
     
-    def region_shade(self, frame, frame_idx):
-        get_splited = self.region_split(frame)
-        try:
-            focuse = get_splited[self.focuse]
-        except Exception as e:
-            return None
+
+    def calc_shade(self,
+                   frame_idx,
+                   sys_xyz,
+                   sys_vdw, 
+                   focuse_xyz,
+                   focuse_vdw,
+                   PolarIdx,
+                   NonPolarIdx):
         
-        surrounding_key = [kk for kk in get_splited.keys() if kk != self.focuse][0]
-        surrounding = get_splited[surrounding_key]
-
-        PolarIdx = np.where((focuse["charge"]>=self.polar_cutoff) | (focuse["charge"] <= self.polar_cutoff * (-0.1)))[0]
-        NonPolarIdx = np.where((focuse["charge"] < self.polar_cutoff) & (focuse["charge"] > self.polar_cutoff * (-0.1)))[0]
-
-        sys_xyz = np.vstack((focuse["xyz"], surrounding["xyz"]))
-        sys_vdw = np.vstack((focuse["vdw"], surrounding["vdw"]))
-
         polar_region_in_sys = grid(xyz=sys_xyz, 
                                     vdw=sys_vdw, 
                                     margin=self.margin,
@@ -196,14 +229,14 @@ class adc_agg():
                                         nMC=self.nMC,
                                         xyz_idx_list=list(NonPolarIdx)).run()
         
-        polar_region_in_solo = grid(xyz=focuse["xyz"], 
-                                    vdw=focuse["vdw"], 
+        polar_region_in_solo = grid(xyz=focuse_xyz, 
+                                    vdw=focuse_vdw, 
                                     margin=self.margin,
                                     nMC=self.nMC,
                                     xyz_idx_list=list(PolarIdx)).run()
 
-        nonpolar_region_in_solo = grid(xyz=focuse["xyz"], 
-                                    vdw=focuse["vdw"], 
+        nonpolar_region_in_solo = grid(xyz=focuse_xyz, 
+                                    vdw=focuse_vdw, 
                                     margin=self.margin,
                                     nMC=self.nMC,
                                     xyz_idx_list=list(NonPolarIdx)).run()
@@ -215,19 +248,11 @@ class adc_agg():
                            "polar_mol": [len(nonpolar_region_in_solo)],
                            "delta_polar_sas": [len(polar_region_in_solo) - len(polar_region_in_sys)],
                            "delta_nonpolar_sas": [len(nonpolar_region_in_solo) - len(nonpolar_region_in_sys)]})
+
         return df
-    
-    def sequential(self, frame_list):
-        _list = []
-        for frame in frame_list:
-            df = self.region_shade(frame, frame.frame)
-            _list.append(df)
-        
-        return _list
 
 
     def run(self):
-        u = mda.Universe(self.md_tpr, self.md_traj)
 
         # frame list -> u.trajectory
 
@@ -250,7 +275,7 @@ class adc_agg():
             n_in_thread = math.ceil(len(u.trajectory) / n_thread)
 
         _collect = Parallel(n_jobs=n_thread)(\
-                           delayed(sequential)(u.trajectory[i*n_in_thread:(i+1)*n_in_thread]) \
+                           delayed(self.region_split)(self.u.trajectory[i*n_in_thread:(i+1)*n_in_thread]) \
                            for i in range(n_thread))
 
 
