@@ -17,6 +17,8 @@ import logging
 logging.basicConfig(format='[%(levelname)s] %(message)s', \
                     level=logging.INFO)
 
+logging.getLogger('MDAnalysis').setLevel(logging.ERROR)
+
 
 class grid():
     def __init__(self, **args):
@@ -390,17 +392,17 @@ def output(data_dic: dict, save_dir: str, if_direct_save: bool) -> object:
     ss_idx = [321, 322, 323, 324, 325, 326]
 
     titles = ["Shield surface in total",
-            "Ratio of $\Delta_{Polar Surface}$ vs $\Delta_{Non Polar Surface}$",
-            "$\Delta_{Non Polar Surface}$",
-            "$\Delta_{Polar Surface}$",
-            "Ratio of $\Delta_{Non Polar Surface}$",
-            "Ratio of $\Delta_{Polar Surface}$ "]
+            r"Ratio of $\Delta_{Polar Surface}$ vs $\Delta_{Non Polar Surface}$",
+            r"$\Delta_{Non Polar Surface}$",
+            r"$\Delta_{Polar Surface}$",
+            r"Ratio of $\Delta_{Non Polar Surface}$",
+            r"Ratio of $\Delta_{Polar Surface}$ "]
     ylabels = ["Sheilded surface sas",
-            "$\Delta_{Polar Surface}$ / $\Delta_{Non Polar Surface}$",
-            "$\Delta_{Non Polar Surface}$",
-            "$\Delta_{Polar Surface}$",
-            "$\Delta_{Non Polar Surface}$ / ($\Delta_{Non Polar Surface}$ +  $\Delta_{Polar Surface}$)",
-            "$\Delta_{Polar Surface}$ / ($\Delta_{Non Polar Surface}$ +  $\Delta_{Polar Surface}$)"]
+            r"$\Delta_{Polar Surface}$ / $\Delta_{Non Polar Surface}$",
+            r"$\Delta_{Non Polar Surface}$",
+            r"$\Delta_{Polar Surface}$",
+            r"$\Delta_{Non Polar Surface}$ / ($\Delta_{Non Polar Surface}$ +  $\Delta_{Polar Surface}$)",
+            r"$\Delta_{Polar Surface}$ / ($\Delta_{Non Polar Surface}$ +  $\Delta_{Polar Surface}$)"]
 
     #f, axes = plt.subplots(3, 2, figsize=(12,8),tight_layout=True)
     f = plt.figure(figsize=(15, 9), tight_layout=True)
@@ -442,17 +444,26 @@ def checker(xtc_list: list,
             ) -> object:
     
     if len(xtc_list) != len(tpr_list):
-        logging.info(f"Sample size for trj and tpr not met")
-        logging.info("Terminated")
+        logging.info("Input sample size for trj and tpr not met")
+        logging.info("Abort")
         return None
     
     paired = {}
-    
+
+    #for prefix, trj in xtc_dict.items():
+    #    try:
+    #        get_topo = tpr_dict[prefix]
+    #    except Exception as e:
+    #        logging.info(f"Can not find topo file for system {prefix}")
+    #        logging.info("Abort")
+        
+    #    paired.setdefault(prefix, [trj, get_topo])  
+
     for ii, trj in enumerate(xtc_list):
         prefix = trj.split("/")[-1].split(".")[0]
-        _path = "/".join(trj.split("/")[:-1])
+        #_path = "/".join(trj.split("/")[:-1])
         try:
-            get_tpr = [tt for tt in tpr_list if tt == os.path.join(_path, f"{prefix}.tpr")]
+            get_tpr = [tt for tt in tpr_list if tt.split("/")[-1].split(".")[0] == prefix]
         except Exception as e:
             logging.info(f"Missing {prefix}.tpr")
             logging.info("Terminated")
@@ -463,13 +474,14 @@ def checker(xtc_list: list,
             logging.info("Terminated")
             return None
         
-        paired.setdefault(trj, get_tpr[0])   
+        paired.setdefault(prefix, [trj, get_tpr[0]])   
     
     return paired
         
 def executor(
-             #xtc_list: list, 
-             #tpr_list: list,
+             xtc_list: list, 
+             tpr_list: list,
+             #paired: dict,
              focuse: str,
              polar_cutoff: float,
              hit_scope: float,
@@ -481,25 +493,38 @@ def executor(
     work_dir = os.getcwd()
     
     ## collect trj and tpr name list
-    xtc_list = [xtc for xtc in os.listdir() if xtc.endswith(".xtc")]
-    tpr_list = [tpr for tpr in os.listdir() if tpr.endswith(".tpr")]
+    #xtc_list = [xtc for xtc in os.listdir() if xtc.endswith(".xtc")]
+    #tpr_list = [tpr for tpr in os.listdir() if tpr.endswith(".tpr")]
+
+    focuse_dic = {
+        "Antibody": "Ab",
+        "Linker_Payload": "LP"
+    }
+
+    try:
+        get_focuse = focuse_dic[focuse]
+    except Exception as e:
+        logging.info("No available region with defined focuse, switch to default as [Antibody]")
+        get_focuse = "Ab"
 
     logging.info("----> STEP 0: Collecting trj")
 
     paired = checker(xtc_list, tpr_list)
     if not paired:
-        return None
+        logging.info("No input trj and/or topology")
+        logging.info("Abort")
+        return 
     
     logging.info("----> STEP 1: Analyze trj")
 
     col = {}
-    for trj, tpr in paired.items():
-        prefix = trj.split("/")[-1].split(".")[0]
+    for prefix, md_input in paired.items():
+        #prefix = trj.split("/")[-1].split(".")[0]
         logging.info(f"-- Working with {prefix}")
 
-        df = adc_agg(md_traj=trj,
-                     md_tpr=tpr,
-                     focuse=focuse,
+        df = adc_agg(md_traj=md_input[0],
+                     md_tpr=md_input[1],
+                     focuse=get_focuse,
                      polar_cutoff=polar_cutoff,
                      hit_scope=hit_scope,
                      ter_res_idx=ter_res_idx,
@@ -529,11 +554,16 @@ def executor(
         os.remove(vv)
         dic.setdefault(kk, df)
     
-    output(data_dic=dic,
-           save_dir=work_dir, 
-           if_direct_save=True)
-    
     logging.info("----> Done")
+    
+    return dic
+    
+    #output(data_dic=dic,
+    #       save_dir=output_dir, 
+    #       if_direct_save=True)
+    
+    #logging.info("----> Done")
+    #return 
 
 
 
