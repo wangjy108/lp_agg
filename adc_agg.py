@@ -99,6 +99,7 @@ class adc_agg():
         self.md_tpr = args["md_tpr"]
 
         self.focuse = args["focuse"]
+        # ["Ab", "LP", "ADC"]
 
         self.trj_type = self.md_traj.split(".")[-1]
 
@@ -223,63 +224,91 @@ class adc_agg():
             get_ab_vdw = np.array(vdw_ab).reshape(-1,1)
             get_ab_charge = np.array(charge_ab).reshape(-1,1)
 
-            region = {"LP": {"xyz": get_LP_xyz,
+            
+            region = {
+                    "frame_idx": ts.frame,
+                    "LP": {"xyz": get_LP_xyz,
                         "vdw": get_LP_vdw,
                         "charge": get_LP_charge},
-                      "Ab": {"xyz": get_ab_xyz,
+                    "Ab": {"xyz": get_ab_xyz,
                         "vdw": get_ab_vdw,
                         "charge": get_ab_charge}}
-
-            try:
-                focuse = region[self.focuse]
-            except Exception as e:
-                return None
             
-            surrounding_key = [kk for kk in region.keys() if kk != self.focuse][0]
-            surrounding = region[surrounding_key]
-
-            PolarIdx = np.where((focuse["charge"]>=self.polar_cutoff) | (focuse["charge"] <= self.polar_cutoff * (-0.1)))[0]
-            NonPolarIdx = np.where((focuse["charge"] < self.polar_cutoff) & (focuse["charge"] > self.polar_cutoff * (-0.1)))[0]
-
-            sys_xyz = np.vstack((focuse["xyz"], surrounding["xyz"]))
-            sys_vdw = np.vstack((focuse["vdw"], surrounding["vdw"]))
-
-            #print(sys_xyz)
-
-            assemble.append({
-                "frame_idx": ts.frame,
-                "sys_xyz": sys_xyz,
-                "sys_vdw": sys_vdw,
-                "focuse_xyz": focuse["xyz"],
-                "focuse_vdw": focuse["vdw"],
-                "PolarIdx": PolarIdx,
-                "NonPolarIdx": NonPolarIdx
-            })
-
-
-
-            #get_df = self.calc_shade(frame_idx=ts.frame + index_shift,
-            #                        sys_xyz=sys_xyz,
-            #                        sys_vdw=sys_vdw, 
-            #                        focuse_xyz=focuse["xyz"],
-            #                        focuse_vdw=focuse["vdw"],
-            #                        PolarIdx=PolarIdx,
-            #                        NonPolarIdx=NonPolarIdx)
-
-            #assemble.append(get_df)
-
+            assemble.append(region)
+        
         return assemble
     
 
+    def collect_region(self,
+                   dic: dict,
+                   focuse: str) -> dict:
+
+                #   frame_idx: int,
+                #   sys_xyz: object,
+                #   sys_vdw: object, 
+                #   focuse_xyz: object,
+                #   focuse_vdw: object,
+                #   PolarIdx: list,
+                #   NonPolarIdx: list) -> object:
+            
+            ## assemble seperate region
+            
+
+        if focuse == "LP":
+            sys_xyz = np.vstack((dic["LP"]["xyz"], dic["Ab"]["xyz"]))
+            sys_vdw = np.vstack((dic["LP"]["vdw"], dic["Ab"]["vdw"]))
+
+            focuse_xyz = dic["LP"]["xyz"]
+            focuse_vdw = dic["LP"]["vdw"]
+
+            PolarIdx = np.where((dic["LP"]["charge"]>=self.polar_cutoff) | (dic["LP"]["charge"] <= self.polar_cutoff * (-0.1)))[0]
+            NonPolarIdx = np.where((dic["LP"]["charge"] < self.polar_cutoff) & (dic["LP"]["charge"] > self.polar_cutoff * (-0.1)))[0]
+        
+        elif focuse == "Ab":
+            sys_xyz = np.vstack((dic["Ab"]["xyz"], dic["LP"]["xyz"]))
+            sys_vdw = np.vstack((dic["Ab"]["vdw"], dic["LP"]["vdw"]))
+
+            focuse_xyz = dic["Ab"]["xyz"]
+            focuse_vdw = dic["Ab"]["vdw"]
+
+            PolarIdx = np.where((dic["Ab"]["charge"]>=self.polar_cutoff) | (dic["Ab"]["charge"] <= self.polar_cutoff * (-0.1)))[0]
+            NonPolarIdx = np.where((dic["Ab"]["charge"] < self.polar_cutoff) & (dic["Ab"]["charge"] > self.polar_cutoff * (-0.1)))[0]
+        
+        elif focuse == "ADC":
+            sys_xyz = np.vstack((dic["Ab"]["xyz"], dic["LP"]["xyz"]))
+            sys_vdw = np.vstack((dic["Ab"]["vdw"], dic["LP"]["vdw"]))
+            sys_charge = np.vstack((dic["Ab"]["charge"], dic["LP"]["charge"]))
+
+            focuse_xyz = sys_xyz
+            focuse_vdw = sys_vdw
+            
+            PolarIdx = np.where((sys_charge >= self.polar_cutoff) | (sys_charge <= self.polar_cutoff * (-0.1)))[0]
+            NonPolarIdx = np.where((sys_charge < self.polar_cutoff) & (sys_charge > self.polar_cutoff * (-0.1)))[0]
+        
+        else:
+            return None
+        
+        return {
+            "frame_idx": dic["frame_idx"],
+            "sys_xyz": sys_xyz,
+            "sys_vdw": sys_vdw,
+            "focuse_xyz": focuse_xyz,
+            "focuse_vdw": focuse_vdw,
+            "PolarIdx": PolarIdx,
+            "NonPolarIdx": NonPolarIdx
+        }
+
+            
     def calc_shade(self,
                    frame_idx: int,
                    sys_xyz: object,
-                   sys_vdw: object, 
+                   sys_vdw: object,
                    focuse_xyz: object,
                    focuse_vdw: object,
-                   PolarIdx: list,
-                   NonPolarIdx: list) -> object:
-        
+                   PolarIdx: object,
+                   NonPolarIdx: object,
+                   ) -> dict: 
+
         polar_region_in_sys = grid(xyz=sys_xyz, 
                                     vdw=sys_vdw, 
                                     margin=self.margin,
@@ -291,6 +320,16 @@ class adc_agg():
                                         margin=self.margin,
                                         nMC=self.nMC,
                                         xyz_idx_list=list(NonPolarIdx)).run()
+        
+        if sys_xyz.shape[0] == focuse_xyz.shape[0]:
+            stat =  {"idx": frame_idx,
+                    "polar_mol_in_sys": len(polar_region_in_sys),
+                    "nonpolar_mol_in_sys": len(nonpolar_region_in_sys),
+                    "polar_mol": 0,
+                    "nonpolar_mol": 0}
+            
+            return stat
+
         
         polar_region_in_solo = grid(xyz=focuse_xyz, 
                                     vdw=focuse_vdw, 
@@ -304,11 +343,65 @@ class adc_agg():
                                     nMC=self.nMC,
                                     xyz_idx_list=list(NonPolarIdx)).run()
         
-        df = pd.DataFrame({"idx": [frame_idx],
-                           "polar_mol_in_sys": [len(polar_region_in_sys)],
-                           "nonpolar_mol_in_sys": [len(nonpolar_region_in_sys)],
-                           "polar_mol": [len(polar_region_in_solo)],
-                           "nonpolar_mol": [len(nonpolar_region_in_solo)]})
+        stat =  {"idx": frame_idx,
+                "polar_mol_in_sys": len(polar_region_in_sys),
+                "nonpolar_mol_in_sys": len(nonpolar_region_in_sys),
+                "polar_mol": len(polar_region_in_solo),
+                "nonpolar_mol": len(nonpolar_region_in_solo)}
+        
+        return stat
+
+    
+    def region_spefic_readout(self,
+                              trj_dic: dict) -> object:
+        
+        if self.focuse != "ADC":
+            input_dic = self.collect_region(trj_dic, self.focuse)
+            stat = self.calc_shade(frame_idx = input_dic["frame_idx"],
+                                    sys_xyz = input_dic["sys_xyz"],
+                                    sys_vdw = input_dic["sys_vdw"],
+                                    focuse_xyz = input_dic["focuse_xyz"],
+                                    focuse_vdw = input_dic["focuse_vdw"],
+                                    PolarIdx = input_dic["PolarIdx"],
+                                    NonPolarIdx = input_dic["NonPolarIdx"])
+            df = pd.DataFrame(stat, index=[0,])
+        
+        else:
+            input_dic = self.collect_region(trj_dic, "ADC")
+            stat_whole = self.calc_shade(frame_idx = input_dic["frame_idx"],
+                                    sys_xyz = input_dic["sys_xyz"],
+                                    sys_vdw = input_dic["sys_vdw"],
+                                    focuse_xyz = input_dic["focuse_xyz"],
+                                    focuse_vdw = input_dic["focuse_vdw"],
+                                    PolarIdx = input_dic["PolarIdx"],
+                                    NonPolarIdx = input_dic["NonPolarIdx"])
+            
+            input_dic_ab = self.collect_region(trj_dic, "Ab")
+            stat_ab = self.calc_shade(frame_idx = input_dic_ab["frame_idx"],
+                                    sys_xyz = input_dic_ab["sys_xyz"],
+                                    sys_vdw = input_dic_ab["sys_vdw"],
+                                    focuse_xyz = input_dic_ab["focuse_xyz"],
+                                    focuse_vdw = input_dic_ab["focuse_vdw"],
+                                    PolarIdx = input_dic_ab["PolarIdx"],
+                                    NonPolarIdx = input_dic_ab["NonPolarIdx"])
+            
+            input_dic_lp = self.collect_region(trj_dic, "LP")
+            stat_lp = self.calc_shade(frame_idx = input_dic_lp["frame_idx"],
+                                    sys_xyz = input_dic_lp["sys_xyz"],
+                                    sys_vdw = input_dic_lp["sys_vdw"],
+                                    focuse_xyz = input_dic_lp["focuse_xyz"],
+                                    focuse_vdw = input_dic_lp["focuse_vdw"],
+                                    PolarIdx = input_dic_lp["PolarIdx"],
+                                    NonPolarIdx = input_dic_lp["NonPolarIdx"])
+
+            polar_sys = stat_ab["polar_mol"] + stat_lp["polar_mol"]
+            nonpolar_sys = stat_ab["nonpolar_mol"] + stat_lp["nonpolar_mol"]
+
+            df = pd.DataFrame({"idx": [input_dic["frame_idx"]],
+                               "polar_mol_in_sys": [stat_whole["polar_mol_in_sys"]],
+                               "nonpolar_mol_in_sys": [stat_whole["nonpolar_mol_in_sys"]],
+                               "polar_mol": [polar_sys],
+                               "nonpolar_mol": nonpolar_sys})
 
         return df
 
@@ -337,13 +430,14 @@ class adc_agg():
         _col = []
 
         for item in assembled_info_in_list:
-            get_df = self.calc_shade(frame_idx=item["frame_idx"],
-                                     sys_xyz=item["sys_xyz"],
-                                     sys_vdw=item["sys_vdw"], 
-                                     focuse_xyz=item["focuse_xyz"],
-                                     focuse_vdw=item["focuse_vdw"],
-                                     PolarIdx=item["PolarIdx"],
-                                     NonPolarIdx=item["NonPolarIdx"])
+            get_df = self.region_spefic_readout(item)
+            #get_df = self.calc_shade(frame_idx=item["frame_idx"],
+            #                         sys_xyz=item["sys_xyz"],
+            #                         sys_vdw=item["sys_vdw"], 
+            #                         focuse_xyz=item["focuse_xyz"],
+            #                         focuse_vdw=item["focuse_vdw"],
+            #                         PolarIdx=item["PolarIdx"],
+            #                         NonPolarIdx=item["NonPolarIdx"])
             _col.append(get_df)
         
         return _col
@@ -498,14 +592,15 @@ def executor(
 
     focuse_dic = {
         "Antibody": "Ab",
-        "Linker_Payload": "LP"
+        "Linker_Payload": "LP",
+        "ADC": "ADC"
     }
 
     try:
         get_focuse = focuse_dic[focuse]
     except Exception as e:
-        logging.info("No available region with defined focuse, switch to default as [Antibody]")
-        get_focuse = "Ab"
+        logging.info("No available region with defined focuse, switch to default as [ADC]")
+        get_focuse = "ADC"
 
     logging.info("----> STEP 0: Collecting trj")
 
